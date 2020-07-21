@@ -13,11 +13,13 @@ from utils import constant, torch_utils
 
 class GCNClassifier(nn.Module):
     """ A wrapper classifier for GCNRelationModel. """
-    def __init__(self, opt, emb_matrix=None):
+    def __init__(self, opt, transe_model, emb_matrix=None):
         super().__init__()
         self.gcn_model = GCNRelationModel(opt, emb_matrix=emb_matrix)
         in_dim = opt['hidden_dim']
-        self.classifier = nn.Linear(in_dim, opt['num_class'])
+
+        self.transe_model = transe_model
+        self.classifier = nn.Linear(in_dim, opt['knowledge_dim'])
         self.opt = opt
 
     def conv_l2(self):
@@ -26,6 +28,7 @@ class GCNClassifier(nn.Module):
     def forward(self, inputs):
         outputs, pooling_output = self.gcn_model(inputs)
         logits = self.classifier(outputs)
+        logits = torch.mm(logits, self.transe_model.rel_embeddings.weight.transpose(0, 1))
         return logits, pooling_output
 
 class GCNRelationModel(nn.Module):

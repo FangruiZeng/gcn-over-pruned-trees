@@ -11,6 +11,9 @@ from model.trainer import GCNTrainer
 from utils import torch_utils, scorer, constant, helper
 from utils.vocab import Vocab
 
+from openke.module.model import TransE
+from openke.data import TrainDataLoader
+
 parser = argparse.ArgumentParser()
 parser.add_argument('model_dir', type=str, help='Directory of the model.')
 parser.add_argument('--model', type=str, default='best_model.pt', help='Name of the model file.')
@@ -33,7 +36,27 @@ elif args.cuda:
 model_file = args.model_dir + '/' + args.model
 print("Loading model from {}".format(model_file))
 opt = torch_utils.load_config(model_file)
-trainer = GCNTrainer(opt)
+
+# dataloader for kge training
+train_dataloader = TrainDataLoader(
+    in_path="./dataset/kge/TACRED/",
+    nbatches=100,
+    threads=8,
+    sampling_mode="normal",
+    bern_flag=1,
+    filter_flag=1,
+    neg_ent=25,
+    neg_rel=0)
+
+# define the transe model
+transe = TransE(
+    ent_tot=train_dataloader.get_ent_tot(),
+    rel_tot=train_dataloader.get_rel_tot(),
+    dim=200,
+    p_norm=1,
+    norm_flag=True)
+
+trainer = GCNTrainer(opt, transe)
 trainer.load(model_file)
 
 # load vocab

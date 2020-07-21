@@ -20,6 +20,14 @@ from model.trainer import GCNTrainer
 from utils import torch_utils, scorer, constant, helper
 from utils.vocab import Vocab
 
+from openke.config import Trainer, Tester
+from openke.module.model import TransE
+from openke.module.loss import MarginLoss
+from openke.module.strategy import NegativeSampling
+from openke.data.loader import TrainDataLoader, TestDataLoader
+
+from tqdm import tqdm
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--data_dir', type=str, default='dataset/tacred')
 parser.add_argument('--vocab_dir', type=str, default='dataset/vocab')
@@ -69,6 +77,8 @@ parser.add_argument('--cpu', action='store_true', help='Ignore CUDA.')
 parser.add_argument('--load', dest='load', action='store_true', help='Load pretrained model.')
 parser.add_argument('--model_file', type=str, help='Filename of the pretrained model.')
 
+parser.add_argument('--knowledge_dim', type=int, default=200, help='Knowledge Graph Embedding size dimension.')
+
 args = parser.parse_args()
 
 torch.manual_seed(args.seed)
@@ -107,21 +117,46 @@ helper.ensure_dir(model_save_dir, verbose=True)
 # save config
 helper.save_config(opt, model_save_dir + '/config.json', verbose=True)
 vocab.save(model_save_dir + '/vocab.pkl')
-file_logger = helper.FileLogger(model_save_dir + '/' + opt['log'], header="# epoch\ttrain_loss\tdev_loss\tdev_score\tbest_dev_score")
+file_logger = helper.FileLogger(model_save_dir + '/' + opt['log'], header="# epoch\ttrain_loss\tdev_loss\tdev_score\tbest_dev_score\thit10")
 
 # print model info
 helper.print_config(opt)
 
+kge_batch_size = 200
+# dataloader for kge training
+train_dataloader = TrainDataLoader(path="./dataset/kge/TACRED/", batch_size=kge_batch_size, negative_times=25)
+
+# dataloader for kge test
+valid_dataloader = TestDataLoader("./dataset/kge/TACRED/", mode='valid')
+
+# define the transe model
+transe = TransE(
+    ent_tot=train_dataloader.get_ent_tot(),
+    rel_tot=train_dataloader.get_rel_tot(),
+    dim=opt['knowledge_dim'],
+    p_norm=1,
+    norm_flag=True)
+
+# define the loss function
+kge_model = NegativeSampling(
+    model=transe,
+    loss=MarginLoss(margin=5.0),
+    batch_size=kge_batch_size
+)
+
+kge_trainer = Trainer(model=kge_model, data_loader=train_dataloader, train_times=50, alpha=1.0, use_gpu=True)
+kge_trainer.init()
+
 # model
 if not opt['load']:
-    trainer = GCNTrainer(opt, emb_matrix=emb_matrix)
+    trainer = GCNTrainer(opt, transe_model=transe, emb_matrix=emb_matrix)
 else:
     # load pretrained model
     model_file = opt['model_file'] 
     print("Loading model from {}".format(model_file))
     model_opt = torch_utils.load_config(model_file)
     model_opt['optim'] = opt['optim']
-    trainer = GCNTrainer(model_opt)
+    trainer = GCNTrainer(model_opt, transe_model=transe)
     trainer.load(model_file)   
 
 id2label = dict([(v,k) for k,v in label2id.items()])
@@ -133,18 +168,36 @@ global_start_time = time.time()
 format_str = '{}: step {}/{} (epoch {}/{}), loss = {:.6f} ({:.3f} sec/batch), lr: {:.6f}'
 max_steps = len(train_batch) * opt['num_epoch']
 
+hit10_history = []
+
 # start training
 for epoch in range(1, opt['num_epoch']+1):
+
+    train_range = tqdm(train_batch)
+    len_kge = len(train_dataloader)
+
     train_loss = 0
-    for i, batch in enumerate(train_batch):
+    for i, batch in enumerate(train_range):
         start_time = time.time()
         global_step += 1
         loss = trainer.update(batch)
         train_loss += loss
+
+        kge_data = train_dataloader[global_step % len_kge]
+        kge_loss = kge_trainer.train_one_step(kge_data)
+
         if global_step % opt['log_step'] == 0:
             duration = time.time() - start_time
-            print(format_str.format(datetime.now(), global_step, max_steps, epoch,\
-                    opt['num_epoch'], loss, duration, current_lr))
+            # print(format_str.format(datetime.now(), global_step, max_steps, epoch,\
+            #         opt['num_epoch'], loss, duration, current_lr))
+            train_range.set_description(
+                "Epoch %d | re_loss: %.6f | kge_loss: %.6f | lr: %.6f" % (epoch, loss, kge_loss, current_lr))
+
+    tester = Tester(model=transe, data_loader=valid_dataloader, use_gpu=True)
+    hit10 = tester.run_link_prediction()
+    if epoch == 1 or hit10 > max(hit10_history):
+        transe.save_checkpoint(model_save_dir + '/kge_model_best.pt')
+    hit10_history += [hit10]
 
     # eval on dev
     print("Evaluating on dev set...")
@@ -159,10 +212,10 @@ for epoch in range(1, opt['num_epoch']+1):
     dev_loss = dev_loss / dev_batch.num_examples * opt['batch_size']
 
     dev_p, dev_r, dev_f1 = scorer.score(dev_batch.gold(), predictions)
-    print("epoch {}: train_loss = {:.6f}, dev_loss = {:.6f}, dev_f1 = {:.4f}".format(epoch,\
-        train_loss, dev_loss, dev_f1))
+    print("epoch {}: train_loss = {:.6f}, dev_loss = {:.6f}, dev_f1 = {:.4f}, hit10 = {:.4f}".format(epoch,\
+        train_loss, dev_loss, dev_f1, hit10))
     dev_score = dev_f1
-    file_logger.log("{}\t{:.6f}\t{:.6f}\t{:.4f}\t{:.4f}".format(epoch, train_loss, dev_loss, dev_score, max([dev_score] + dev_score_history)))
+    file_logger.log("{}\t{:.6f}\t{:.6f}\t{:.4f}\t{:.4f}\t{:.4f}".format(epoch, train_loss, dev_loss, dev_score, max([dev_score] + dev_score_history), hit10))
 
     # save
     model_file = model_save_dir + '/checkpoint_epoch_{}.pt'.format(epoch)

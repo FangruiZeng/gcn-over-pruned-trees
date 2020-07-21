@@ -37,6 +37,7 @@ class Trainer(object):
         params = {
                 'model': self.model.state_dict(),
                 'config': self.opt,
+                'kge_model': self.transe_model.state_dict(),
                 }
         try:
             torch.save(params, filename)
@@ -60,10 +61,11 @@ def unpack_batch(batch, cuda):
     return inputs, labels, tokens, head, subj_pos, obj_pos, lens
 
 class GCNTrainer(Trainer):
-    def __init__(self, opt, emb_matrix=None):
+    def __init__(self, opt, transe_model, emb_matrix=None):
         self.opt = opt
+        self.transe_model = transe_model
         self.emb_matrix = emb_matrix
-        self.model = GCNClassifier(opt, emb_matrix=emb_matrix)
+        self.model = GCNClassifier(opt, transe_model, emb_matrix=emb_matrix)
         self.criterion = nn.CrossEntropyLoss()
         self.parameters = [p for p in self.model.parameters() if p.requires_grad]
         if opt['cuda']:
